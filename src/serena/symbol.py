@@ -11,7 +11,7 @@ from sensai.util.string import ToStringMixin
 import serena.tools.jetbrains_types as jb
 from solidlsp import SolidLanguageServer
 from solidlsp.ls import ReferenceInSymbol as LSPReferenceInSymbol
-from solidlsp.ls_types import Position, SymbolKind, UnifiedSymbolInformation
+from solidlsp.ls_types import Hover, Position, SymbolKind, UnifiedSymbolInformation
 
 from .ls_manager import LanguageServerManager
 from .project import Project
@@ -505,30 +505,89 @@ class LanguageServerSymbolRetriever:
         """
         lang_server = self.get_language_server(relative_file_path)
         hover_info = lang_server.request_hover(relative_file_path=relative_file_path, line=line, column=column)
+        return self._format_hover_contents(hover_info)
+
+    @staticmethod
+    def _format_hover_contents(hover_info: Hover | None) -> str | None:
+        """Parse and format hover response contents into a string.
+
+        Returns None if no content is available or if the content is empty after stripping.
+        """
         if hover_info is None:
             return None
+
         contents = hover_info["contents"]
-        # Handle various response formats
+
         if isinstance(contents, list):
-            # Array format: extract all parts and join them
-            stripped_parts = []
+            stripped_parts: list[str] = []
             for part in contents:
-                if isinstance(part, str) and (stripped_part := part.strip()):
-                    stripped_parts.append(stripped_part)
-                else:
-                    # should be a dict with "value" key
-                    stripped_parts.append(part["value"].strip())  # type: ignore
+                if isinstance(part, str):
+                    stripped_part = part.strip()
+                    if stripped_part:
+                        stripped_parts.append(stripped_part)
+                        continue
+
+                # should be a dict with "value" key
+                stripped_parts.append(part["value"].strip())  # type: ignore[index]
+
             return "\n".join(stripped_parts) if stripped_parts else None
-        if isinstance(contents, dict) and (stripped_contents := contents.get("value", "").strip()):
-            return stripped_contents
-        if isinstance(contents, str) and (stripped_contents := contents.strip()):
-            return stripped_contents
-        return None
+
+        if isinstance(contents, dict):
+            stripped_contents = contents.get("value", "").strip()
+            return stripped_contents if stripped_contents else None
+
+        if isinstance(contents, str):
+            stripped_contents = contents.strip()
+            return stripped_contents if stripped_contents else None
 
     def request_info_for_symbol(self, symbol: LanguageServerSymbol) -> str | None:
         if None in [symbol.relative_path, symbol.line, symbol.column]:
             return None
         return self._request_info(relative_file_path=symbol.relative_path, line=symbol.line, column=symbol.column)  # type: ignore[arg-type]
+
+    def request_info_for_symbols(self, symbols: Sequence[LanguageServerSymbol]) -> list[str | None]:
+        """Retrieve hover info for multiple symbols while minimizing didOpen/didClose overhead.
+
+        Returns a list with 1:1 correspondence to the input list indices.
+
+        When a symbol has a non-empty UnifiedSymbolInformation.detail field, that value
+        is used directly as info (fast-path), avoiding hover/didOpen/didClose calls.
+        """
+        results: list[str | None] = [None] * len(symbols)
+
+        file_groups: dict[str, list[tuple[int, int, int]]] = {}
+        for idx, symbol in enumerate(symbols):
+            # Check for detail fast-path
+            symbol_root = getattr(symbol, "symbol_root", None)
+            if isinstance(symbol_root, dict):
+                detail_raw = symbol_root.get("detail")
+                if isinstance(detail_raw, str):
+                    detail = detail_raw.strip()
+                    if detail:
+                        results[idx] = detail
+                        continue
+
+            relative_path = symbol.relative_path
+            line = symbol.line
+            column = symbol.column
+            if relative_path is None or line is None or column is None:
+                continue
+
+            file_groups.setdefault(relative_path, []).append((idx, line, column))
+
+        for relative_path, indexed_locations in file_groups.items():
+            lang_server = self.get_language_server(relative_path)
+            hover_cache: dict[tuple[int, int], str | None] = {}
+            with lang_server.open_file(relative_path) as buffer:
+                for idx, line, column in indexed_locations:
+                    cache_key = (line, column)
+                    if cache_key not in hover_cache:
+                        hover_info = lang_server._request_hover(buffer.uri, line, column)
+                        hover_cache[cache_key] = self._format_hover_contents(hover_info)
+
+                    results[idx] = hover_cache[cache_key]
+
+        return results
 
     def get_root_path(self) -> str:
         return self._ls_manager.get_root_path()

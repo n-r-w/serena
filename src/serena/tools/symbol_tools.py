@@ -179,11 +179,11 @@ class FindSymbolTool(Tool, ToolMarkerSymbolicRead):
         )
         symbol_dicts = [_sanitize_symbol_dict(s.to_dict(kind=True, location=True, depth=depth, include_body=include_body)) for s in symbols]
         if not include_body and include_info:
-            # we add an info field to the symbol dicts if requested
-            for s, s_dict in zip(symbols, symbol_dicts, strict=True):
-                if symbol_info := symbol_retriever.request_info_for_symbol(s):
-                    s_dict["info"] = symbol_info
-                s_dict.pop("name", None)  # name is included in the info
+            # Batch-fetch info for all symbols to reduce didOpen/didClose overhead.
+            info_results = symbol_retriever.request_info_for_symbols(symbols)
+            for s_dict, info in zip(symbol_dicts, info_results, strict=True):
+                if info:
+                    s_dict["info"] = info
         result = self._to_json(symbol_dicts)
         return self._limit_length(result, max_answer_chars)
 
@@ -228,19 +228,31 @@ class FindReferencingSymbolsTool(Tool, ToolMarkerSymbolicRead):
             include_kinds=parsed_include_kinds,
             exclude_kinds=parsed_exclude_kinds,
         )
+
+        if include_info:
+            symbols_for_info = [ref.symbol for ref in references_in_symbols]
+            info_results = symbol_retriever.request_info_for_symbols(symbols_for_info)
+        else:
+            info_results = [None] * len(references_in_symbols)
+
         reference_dicts = []
-        for ref in references_in_symbols:
-            ref_dict = ref.symbol.to_dict(kind=True, location=True, depth=0, include_body=include_body)
-            ref_dict = _sanitize_symbol_dict(ref_dict)
-            if not include_body:
-                ref_relative_path = ref.symbol.location.relative_path
-                assert ref_relative_path is not None, f"Referencing symbol {ref.symbol.name} has no relative path, this is likely a bug."
-                if include_info and (referencing_symbol_info := symbol_retriever.request_info_for_symbol(ref.symbol)):
-                    ref_dict["info"] = referencing_symbol_info
-                content_around_ref = self.project.retrieve_content_around_line(
-                    relative_file_path=ref_relative_path, line=ref.line, context_lines_before=1, context_lines_after=1
-                )
-                ref_dict["content_around_reference"] = content_around_ref.to_display_string()
+        for idx, ref in enumerate(references_in_symbols):
+            ref_dict = _sanitize_symbol_dict(ref.symbol.to_dict(kind=True, location=True, depth=0, include_body=include_body))
+
+            ref_relative_path = ref.symbol.location.relative_path
+            assert ref_relative_path is not None, f"Referencing symbol {ref.symbol.name} has no relative path, this is likely a bug."
+
+            info = info_results[idx]
+            if info:
+                ref_dict["info"] = info
+
+            content_around_ref = self.project.retrieve_content_around_line(
+                relative_file_path=ref_relative_path,
+                line=ref.line,
+                context_lines_before=1,
+                context_lines_after=1,
+            )
+            ref_dict["content_around_reference"] = content_around_ref.to_display_string()
             reference_dicts.append(ref_dict)
         result = self._to_json(reference_dicts)
         return self._limit_length(result, max_answer_chars)

@@ -124,28 +124,31 @@ class TestSerenaAgent:
     def test_find_symbol(self, serena_agent: SerenaAgent, symbol_name: str, expected_kind: str, expected_file: str):
         agent = serena_agent
         find_symbol_tool = agent.get_tool(FindSymbolTool)
-        result = find_symbol_tool.apply_ex(name_path_pattern=symbol_name)
+        result = find_symbol_tool.apply_ex(name_path_pattern=symbol_name, include_info=True)
 
         symbols = json.loads(result)
         assert any(
             symbol_name in s["name_path"] and expected_kind.lower() in s["kind"].lower() and expected_file in s["relative_path"]
             for s in symbols
         ), f"Expected to find {symbol_name} ({expected_kind}) in {expected_file}"
+
         # testing retrieval of symbol info
-        if serena_agent.get_active_lsp_languages() == [Language.KOTLIN]:
+        active_languages = serena_agent.get_active_lsp_languages()
+        if active_languages == [Language.KOTLIN]:
             # kotlin LS doesn't seem to provide hover info right now, at least for the struct we test this on
             return
+
+        lang = active_languages[0]
         for s in symbols:
             if s["kind"] in (SymbolKind.File.name, SymbolKind.Module.name):
                 # we ignore file and module symbols for the info test
                 continue
+
             symbol_info = s.get("info")
-            assert symbol_info, f"Expected symbol info to be present for symbol: {s}"
-            assert (
-                symbol_name in s["info"]
-            ), f"[{serena_agent.get_active_lsp_languages()[0]}] Expected symbol info to contain symbol name {symbol_name}. Info: {s['info']}"
+            assert symbol_info, f"[{lang}] Expected symbol info to be non-empty for {symbol_name}. Symbol: {s}"
+
             # special additional test for Java, since Eclipse returns hover in a complex format and we want to make sure to get it right
-            if s["kind"] == SymbolKind.Class.name and serena_agent.get_active_lsp_languages() == [Language.JAVA]:
+            if s["kind"] == SymbolKind.Class.name and active_languages == [Language.JAVA]:
                 assert "A simple model class" in symbol_info, f"Java class docstring not found in symbol info: {s}"
 
     @pytest.mark.parametrize(
